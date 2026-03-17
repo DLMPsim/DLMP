@@ -14,234 +14,274 @@ https://github.com/DLMPsim/DLMP
 License:
 MIT License
 """
-
-from mesa import Model
-from mesa.time import RandomActivation
-from MASAAgentCNN import ProcessorAgent
-from trainMASACNN import get_model
 import torch
-import random
+import torch.nn as nn
+import torch.optim as optim
+from torchvision.models import vgg11, resnet18, ResNet18_Weights # now includes resnet18
 import time
-class ParallelizationModel(Model):
+from sklearn.model_selection import train_test_split
+
+from pathlib import Path
+import pandas as pd
+from PIL import Image
+from torch.utils.data import Dataset
+from torchvision import transforms
+
+#---------------------------------------------------------------------------
+# UA-DETRAC dataset
+#--------------------------------------------------------------------------
+class UADetracSceneDataset(Dataset):
     """
-    Simulates a parallel processing environment where multiple processor agents
-    train on different data partitions and exchange their neural network weights
-    asynchronously using a ring topology.
+    UA-DETRAC scene-level classification dataset (mild/medium/congested).
+    Uses DLMP-generated scene_labels_traffic.csv.
+    Returns (image_tensor, class_id).
     """
-    def __init__(self, Training_ds, Training_lbls, Testing_ds, Testing_lbls, device, args):
-        super().__init__()
-        self.device = device
-        self.args = args
-        self.num_processors = args.processors
-        self.schedule = RandomActivation(self)
-        self.total_comm_cost = 0
-        # Compute-capacity upper bound (min is fixed at 1.0)
-        self.capacity_max = getattr(self.args, "capacity_max", 2.0)
+    CLASS_TO_ID = {"mild": 0, "medium": 1, "congested": 2}
 
-        # Initialize model architecture (UA-DETRAC uses args.num_classes)
-        num_classes = getattr(self.args, "num_classes", 100 if self.args.ds == "CIFAR100" else 10)
-        pretrained = getattr(self.args, "imagenet_pretrained", False)
-        self.model = get_model(self.args.arch, num_classes=num_classes, pretrained=pretrained).to(device)
+    def __init__(self, csv_path, dataset_root, split, transform=None, limit=0):
+        self.dataset_root = Path("../data/UA-DETRAC/dataset/UA_DETRAC_CLEAN/content/UA-DETRAC/DETRAC_Upload").resolve()
+        self.split = split
+        self.transform = transform
+        
+        base_dir = Path(__file__).resolve().parent
+        self.csv_path = base_dir / csv_path
+        df = pd.read_csv(self.csv_path)
+
+        # Keep only the requested split
+        df = df[df["split"] == split].copy()
+
+        # Optional limit for smoke tests (limit > 0)
+        if limit and int(limit) > 0:
+            df = df.head(int(limit)).copy()
+
+        # Normalize rel paths for Linux even if CSV was generated on Windows
+        df["image_rel"] = df["image_rel"].astype(str).str.replace("\\", "/", regex=False)
+
+        self.image_rels = df["image_rel"].tolist()
+        self.labels = [self.CLASS_TO_ID[s] for s in df["scene_name"].astype(str).tolist()]
+
+        assert len(self.image_rels) == len(self.labels) and len(self.image_rels) > 0, \
+            f"Empty UA-DETRAC split={split} after filtering."
+
+    def __len__(self):
+        return len(self.image_rels)
+
+    def __getitem__(self, idx):
+        y = self.labels[idx]
+        
+        rel = Path(self.image_rels[idx])
+        img_path = (self.dataset_root / rel).resolve()
+        img = Image.open(img_path).convert("RGB")
+        
+        if self.transform is not None:
+            img = self.transform(img)
+
+        return img, torch.tensor(y, dtype=torch.long)
+
+def get_model(arch, num_classes=10, pretrained=False):
+
+    if arch == 'LeNet5':
+        model = nn.Sequential(
+            nn.Conv2d(1, 20, kernel_size=5, stride=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(20, 50, kernel_size=5, stride=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Flatten(),
+            nn.Linear(4 * 4 * 50, 500),
+            nn.ReLU(),
+            nn.Linear(500, num_classes)
+        )
+        return model
+    elif arch == 'VGG11':
+        model = vgg11(weights=None)
+        model.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        model.classifier = nn.Sequential(
+            nn.Linear(512 * 1 * 1, 4096),
+            nn.ReLU(True),
+            nn.Dropout(),
+            nn.Linear(4096, 4096),
+            nn.ReLU(True),
+            nn.Dropout(),
+            nn.Linear(4096, num_classes)
+        )
+        return model
+    elif arch == 'ResNet18':
+        weights = ResNet18_Weights.DEFAULT if pretrained else None
+        model = resnet18(weights=weights)
+        model.fc = nn.Linear(model.fc.in_features, num_classes)
+        return model
+
+    else:
+        raise ValueError("Unsupported architecture. Use 'LeNet5', 'VGG11', or 'ResNet18'.")
+
+def build_loaders(Training_ds, Training_lbls, Testing_ds, Testing_lbls, device, args):
+    from torch.utils.data import TensorDataset, DataLoader, Subset, Dataset as TorchDataset
+    import torch
+
+    dataset_mode = isinstance(Training_ds, TorchDataset) and isinstance(Testing_ds, TorchDataset)
+
+    if dataset_mode:
+        # Training_lbls and Testing_lbls are index lists in dataset mode.
+        train_subset = Subset(Training_ds, list(map(int, Training_lbls)))
+        test_subset = Subset(Testing_ds, list(map(int, Testing_lbls)))
+
+        # Keep the number of workers bounded across processors.
+ 
+        num_workers = max(1, 8 // args.processors)
+        persistent_workers = (num_workers > 0)
+        pin_memory = (device.type == "cuda")
+
+        train_loader = DataLoader(
+            train_subset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers
+        )
+        test_loader = DataLoader(
+            test_subset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers
+        )
+        return train_loader, test_loader, True, None
+
+    # Existing MNIST/CIFAR behavior (array-mode)
+    X_train = torch.tensor(Training_ds, dtype=torch.float32).to(device)
+    y_train = torch.tensor(Training_lbls, dtype=torch.long).to(device)
+    X_test = torch.tensor(Testing_ds, dtype=torch.float32).to(device)
+    y_test = torch.tensor(Testing_lbls, dtype=torch.long).to(device)
+
+    if args.ds.upper() == 'MNIST' and X_train.ndim == 3:
+        X_train = X_train.unsqueeze(1)
+        X_test = X_test.unsqueeze(1)
+
+    train_dataset = TensorDataset(X_train, y_train)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+
+    # In array mode, evaluation uses direct tensor-based inference.
+    test_loader = None
+
+    return train_loader, test_loader, False, (X_test, y_test)
 
 
-        # Create agents and split data
-        self._split_data_and_create_agents(Training_ds, Training_lbls, Testing_ds, Testing_lbls)
-        # Assign ring peers (one neighbor each)
-            
-        agents = self.schedule.agents
-        n = len(agents)
-        for i, agent in enumerate(agents):
-            if n > 1:
-                neighbor = agents[(i + 1) % n]
-                agent.set_peers([neighbor])
-            else:
-                agent.set_peers([])  # no peer in single-node runs → zero CC/time        
-      
-    def _split_data_and_create_agents(self, Training_ds, Training_lbls, Testing_ds, Testing_lbls):
-        """
-        Supports two modes:
-        1) Array-mode (MNIST/CIFAR): Training_ds is numpy/array-like and is sliced as before.
-        2) Dataset-mode (UA_DETRAC): Training_ds is a torch Dataset; we shard by indices and stream via DataLoader in train_simulated().
-        """
-        import random
-        from torch.utils.data import Dataset as TorchDataset
+# ------------------------------------------------------------------------- #
+#  Training routine
+# ------------------------------------------------------------------------- #
+def train_simulated(
+    unique_id,
+    model,
+    Training_ds,
+    Training_lbls,
+    Testing_ds,
+    Testing_lbls,
+    device,
+    args,
+    sync_callback,
+    epochs_override=None,
+    train_loader=None,
+    test_loader=None,
+    dataset_mode=None,
+    array_eval=None
+):
 
-        dataset_mode = isinstance(Training_ds, TorchDataset) and isinstance(Testing_ds, TorchDataset)
 
-        total_train = len(Training_ds)
-        total_test = len(Testing_ds)
 
-        # Assign compute capacities uniformly in [1.0, capacity_max].
-        low, high = 1.0, float(self.capacity_max)
-        capacities = [random.uniform(low, high) for _ in range(self.num_processors)]
-        self.capacities = capacities
+    start_time = time.time()
 
+    # -----------------------------
+    # Build loaders or reuse cached ones
+    # -----------------------------
+    if train_loader is None:
+        train_loader, test_loader, dataset_mode_built, array_eval_built = build_loaders(
+            Training_ds, Training_lbls, Testing_ds, Testing_lbls, device, args
+        )
+        dataset_mode = dataset_mode_built
+        array_eval = array_eval_built
+    else:
+        # Reuse cached loaders provided by the caller.
+        if dataset_mode is None:
+            dataset_mode = (test_loader is not None)
+        # In array mode, evaluation uses X_test and y_test stored in array_eval.
+        pass
+
+    # Unpack array-mode eval tensors if applicable
+    if not dataset_mode:
+        if array_eval is None:
+            # Fall back to rebuilding loaders to preserve the original behavior.
+            train_loader, test_loader, dataset_mode_built, array_eval = build_loaders(
+                Training_ds, Training_lbls, Testing_ds, Testing_lbls, device, args
+            )
+            dataset_mode = dataset_mode_built
+        X_test, y_test = array_eval
+
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9 if args.optimizer == 'SGDM' else 0.0)
+
+    running_loss = 0.0
+    total_samples = 0
+    correct_train = 0
+
+    # Run one epoch only per call
+    model.train()
+    for inputs, labels in train_loader:
         if dataset_mode:
-            # Shard indices (not the dataset itself)
-            train_indices = list(range(total_train))
-            test_indices = list(range(total_test))
+            inputs = inputs.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
 
-            train_per_agent = total_train // self.num_processors
-            test_per_agent = total_test // self.num_processors
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
 
-            for i in range(self.num_processors):
-                train_start = i * train_per_agent
-                train_end = (i + 1) * train_per_agent if i < self.num_processors - 1 else total_train
+        running_loss += loss.item()
+        _, predicted = outputs.max(1)
+        total_samples += labels.size(0)
+        correct_train += predicted.eq(labels).sum().item()
 
-                test_start = i * test_per_agent
-                test_end = (i + 1) * test_per_agent if i < self.num_processors - 1 else total_test
+    avg_loss = running_loss / max(1, len(train_loader))
+    train_acc = 100.0 * correct_train / max(1, total_samples)
 
-                agent = ProcessorAgent(
-                    unique_id=i,
-                    model=self,
-                    Training_ds=Training_ds,                 # dataset object
-                    Training_lbls=train_indices[train_start:train_end],  # indices shard
-                    Testing_ds=Testing_ds,                   # dataset object
-                    Testing_lbls=test_indices[test_start:test_end],      # indices shard
-                    device=self.device,
-                    args=self.args
-                )
-                self.schedule.add(agent)
+    print(f"Node {unique_id + 1}: Loss = {avg_loss:.4f}, Accuracy = {train_acc:.2f}%")
 
-                agent.compute_capacity = capacities[i]
-                print(f"Node {i + 1} compute capacity (uniform {low}..{high}): {agent.compute_capacity:.3f}")
+    # Synchronize weights once per call.
+    sync_callback(model.state_dict())
 
+    # -----------------------------
+    # Evaluation
+    # -----------------------------
+    model.eval()
+    with torch.no_grad():
+        if dataset_mode:
+            correct_test = 0
+            total_test = 0
+            for inputs, labels in test_loader:
+                inputs = inputs.to(device, non_blocking=True)
+                labels = labels.to(device, non_blocking=True)
+
+                outputs = model(inputs)
+                _, predicted = outputs.max(1)
+                total_test += labels.size(0)
+                correct_test += predicted.eq(labels).sum().item()
+
+            test_acc = 100.0 * correct_test / max(1, total_test)
         else:
-            # Existing array slicing behavior (MNIST/CIFAR)
-            train_per_agent = total_train // self.num_processors
-            test_per_agent = total_test // self.num_processors
+            outputs = model(X_test)
+            _, predicted = outputs.max(1)
+            total_test = y_test.size(0)
+            correct_test = predicted.eq(y_test).sum().item()
+            test_acc = 100.0 * correct_test / total_test if total_test else 0.0
 
-            for i in range(self.num_processors):
-                train_start = i * train_per_agent
-                train_end = (i + 1) * train_per_agent if i < self.num_processors - 1 else total_train
+    end_time = time.time()
+    processing_time = end_time - start_time
 
-                test_start = i * test_per_agent
-                test_end = (i + 1) * test_per_agent if i < self.num_processors - 1 else total_test
+    print(f"Node {unique_id + 1} Final Validation: Accuracy = {test_acc:.2f}%\n")
 
-                agent = ProcessorAgent(
-                    unique_id=i,
-                    model=self,
-                    Training_ds=Training_ds[train_start:train_end],
-                    Training_lbls=Training_lbls[train_start:train_end],
-                    Testing_ds=Testing_ds[test_start:test_end],
-                    Testing_lbls=Testing_lbls[test_start:test_end],
-                    device=self.device,
-                    args=self.args
-                )
-                self.schedule.add(agent)
-
-                agent.compute_capacity = capacities[i]
-                print(f"Node {i + 1} compute capacity (uniform {low}..{high}): {agent.compute_capacity:.3f}")
-
-
-    def step(self):
-        self.schedule.step()
-        total_correct = 0
-        total_test_examples = 0
-        slowest_processing_time = 0
-        epoch_cc = 0
-        for agent in self.schedule.agents:
-            total_correct += agent.correct_classifications
-            total_test_examples += agent.test_set_size
-            slowest_processing_time = max(slowest_processing_time, agent.processing_time)
-            epoch_cc += agent.last_cc
-        self.total_comm_cost += epoch_cc
-        total_testing_accuracy = (total_correct / total_test_examples) * 100 if total_test_examples > 0 else 0
-        print(f"Total Testing Accuracy this epoch: {total_correct}/{total_test_examples} = {total_testing_accuracy:.2f}%")
-        self.last_epoch_total_acc = total_testing_accuracy
-        # Compute-only time (slowest node)
-        print(f"Processing Time (compute only) this epoch: {slowest_processing_time:.4f} seconds")
-        self.total_compute_time = getattr(self, "total_compute_time", 0.0) + slowest_processing_time
-
-        # Communication time for the epoch (slowest node).
-        slowest_comm_time = max(getattr(a, 'last_comm_time_s', 0.0) for a in self.schedule.agents)
-        print(f"Communication Time (assumed {self.args.net_bw_mbps} Mbps): {slowest_comm_time:.4f} seconds")
-        self.total_comm_time = getattr(self, "total_comm_time", 0.0) + slowest_comm_time
-        # end-to-end = compute + comm
-        end_to_end_time = slowest_processing_time + slowest_comm_time
-        print(f"Processing Time (end-to-end) this epoch: {end_to_end_time:.4f} seconds")
-        print(f"Cumulative Communication Cost until now: {self.total_comm_cost} bytes")
-        self.total_e2e_time = getattr(self, "total_e2e_time", 0.0) + end_to_end_time
-
-    def run_model(self, epochs):
-    
-        total_train_correct = 0
-        total_train_items   = 0
-
-        total_comm_cost = 0
-        total_compute_time = 0.0
-        total_comm_time = 0.0
-        total_e2e_time = 0.0
-        total_correct_items = 0
-        total_test_items = 0
-
-        for epoch_idx in range(1, epochs + 1):
-            print(f"\n** Epoch {epoch_idx} of {epochs} starts **")
-
-            # Reset per-epoch totals
-            slowest_processing_time = 0.0
-            slowest_comm_time = 0.0
-            total_correct = 0
-            total_test_examples = 0
-
-            if self.num_processors == 1:
-                # No sync or comm time in single-node runs
-                for agent in self.schedule.agents:
-                    agent.last_cc = 0
-                    agent.last_comm_time_s = 0.0
-                self.step()
-            else:
-                self.step()
-
-            # After agents step, collect metrics
-            for agent in self.schedule.agents:
-                total_correct += agent.correct_classifications
-                total_test_examples += agent.test_set_size
-                slowest_processing_time = max(slowest_processing_time, agent.processing_time)
-                slowest_comm_time = max(slowest_comm_time, getattr(agent, "last_comm_time_s", 0.0))
-
-            # Communication cost (skip if single node)
-            if self.num_processors > 1:
-                comm_cost = sum(getattr(agent, "last_cc", 0) for agent in self.schedule.agents)
-                total_comm_cost += comm_cost
-                print(f"Communication cost this epoch: {comm_cost} bytes; "
-                      f"Cumulative cost: {total_comm_cost} bytes")
-            else:
-                print("Only one processor: skipping weight synchronization and communication cost.")
-
-            # Accuracy and times for this epoch
-            accuracy = 100.0 * total_correct / total_test_examples
-            total_correct_items += total_correct
-            total_test_items += total_test_examples
-            total_compute_time += slowest_processing_time
-                       
-            print(f"TOTAL Final Accuracy after epoch: {accuracy:.2f}%")
-            print(f"Processing Time (compute only): {slowest_processing_time:.4f} seconds")
-
-            epoch_comm_time_sum = (0.0 if self.num_processors == 1 else
-                sum(getattr(agent, "last_comm_time_s", 0.0) for agent in self.schedule.agents))
-            total_comm_time += epoch_comm_time_sum
-            print(f"Communication Time (sum over nodes): {epoch_comm_time_sum:.4f} seconds")
-            total_e2e_time += slowest_processing_time + slowest_comm_time
-            print(f"Processing end-to-end time: {slowest_processing_time + slowest_comm_time:.4f} seconds")
-            # --- TOTAL Training Accuracy after epoch (all nodes, all datasets) ---
-            train_correct_this_epoch = sum(a.train_correct for a in self.schedule.agents)
-            train_total_this_epoch   = sum(a.train_total   for a in self.schedule.agents)
-            train_accuracy = 100.0 * train_correct_this_epoch / train_total_this_epoch if train_total_this_epoch else 0.0
-            print(f"TOTAL Training Accuracy after epoch: {train_correct_this_epoch}/{train_total_this_epoch} = {train_accuracy:.2f}%")
-
-            # accumulate GRAND totals
-            total_train_correct += train_correct_this_epoch
-            total_train_items   += train_total_this_epoch
-
-        # --- Final GRAND TOTALS ---
-        grand_test_acc = 100.0 * total_correct_items / total_test_items if total_test_items else 0.0
-        print(f"\nGRAND TOTAL Final Accuracy: {total_correct_items}/{total_test_items} = {grand_test_acc:.2f}%")
-        print(f"GRAND TOTAL Communication Cost over all epochs: {total_comm_cost} bytes")
-        print(f"GRAND TOTAL Communication Time over all epochs: {total_comm_time:.4f} seconds")
-        print(f"GRAND TOTAL Processing Time (compute only): {total_compute_time:.4f} seconds")
-        print(f"GRAND TOTAL Processing end-to-end time: {total_e2e_time:.4f} seconds")
-
-        grand_train_acc = 100.0 * total_train_correct / total_train_items if total_train_items else 0.0
-        print(f"GRAND TOTAL Training Accuracy: {total_train_correct}/{total_train_items} = {grand_train_acc:.2f}%")
-             
+    return avg_loss, test_acc, correct_test, total_test, processing_time, correct_train, total_samples
