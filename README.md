@@ -12,7 +12,7 @@ ANNSIM 2026.
 
 Dataset Size and Hardware Considerations
 
-DLMP can run on a standard personal computer. However, the ability to run a specific experiment depends on the dataset size and the amount of available system memory (RAM).
+DLMP can run on a standard personal computer. However, the ability to run a specific experiment depends on the dataset size and the amount of available RAM.
 
 Smaller datasets require less memory and can be executed on basic machines. Larger datasets require more memory and computational resources.
 
@@ -27,10 +27,11 @@ Because of this difference in dataset size, the lightweight reproducible configu
 
 If larger datasets are used, the following limitations may occur on a basic PC:
 
-insufficient RAM to load the dataset
+-insufficient RAM to load the dataset
 
-long training time
+-long training time
 
-reduced performance when using CPU-only execution
+-reduced performance when using CPU-only execution
 
 Users with limited hardware resources are therefore encouraged to start with the MNIST configuration, which is intended to demonstrate the simulator functionality without requiring specialized hardware.
+
