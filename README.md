@@ -45,7 +45,7 @@ Users with limited hardware resources are therefore encouraged to start with the
 
 -At least 4 GB RAM (more improves runtime)
 
-## SETUP
+## Setup
 
 All experiments run on CPU by default. No additional configuration is required.
 
