@@ -16,7 +16,6 @@ MIT License
 """
 import copy
 from mesa import Agent
-from trainMASACNN import train_simulated, build_loaders
 
 import torch
 
@@ -28,6 +27,7 @@ class ProcessorAgent(Agent):
     in peer-to-peer weight exchange.
     """
     def __init__(self, unique_id, model, Training_ds, Training_lbls, Testing_ds, Testing_lbls, device, args):
+        from trainMASACNN import build_loaders
         super().__init__(unique_id, model)
         self.Training_ds = Training_ds
         self.Training_lbls = Training_lbls
@@ -80,6 +80,7 @@ class ProcessorAgent(Agent):
 
     def step(self):
         import time
+        from trainMASACNN import train_simulated
         
         # Compute-only timing
         compute_start = time.time()
