@@ -22,7 +22,6 @@ from trainMASACNN import get_model
 import torch
 import random
 import time
-
 class ParallelizationModel(Model):
     """
     Simulates a parallel processing environment where multiple processor agents
