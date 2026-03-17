@@ -14,6 +14,11 @@ https://github.com/DLMPsim/DLMP
 License:
 MIT License
 """
+# --------------------------------------------------
+# Entry point for the DLMP peer-to-peer (P2P) distributed training experiment.
+# This script configures the simulation parameters, loads the selected dataset,
+# initializes the agent-based training model, and runs the experiment.
+# --------------------------------------------------
 import torch
 import argparse
 from MASAModelCNN import ParallelizationModel
