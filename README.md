@@ -10,7 +10,7 @@ Communication Traffic Reduction in Edge-Enabled Distributed Deep Learning
 Using Peer-to-Peer Coordination.
 ANNSIM 2026.
 
-Dataset Size and Hardware Considerations
+## Dataset Size and Hardware Considerations
 
 DLMP can run on a standard personal computer. However, the ability to run a specific experiment depends on the dataset size and the amount of available RAM.
 
@@ -34,4 +34,42 @@ If larger datasets are used, the following limitations may occur on a basic PC:
 -reduced performance when using CPU-only execution
 
 Users with limited hardware resources are therefore encouraged to start with the MNIST configuration, which is intended to demonstrate the simulator functionality without requiring specialized hardware.
+
+## Requirements
+
+-Windows 10/11 (64-bit) (can run in Linux)
+
+-Python 3.10
+
+-No GPU required (can run in GPU as well)
+
+-At least 4 GB RAM (more improves runtime)
+
+## SETUP
+
+All experiments run on CPU by default. No additional configuration is required.
+
+python -m venv dlmp_env
+dlmp_env\Scripts\activate
+python -m pip install --upgrade pip
+pip install torch==2.2.2 torchvision==0.17.2 mesa==2.3.2 numpy
+
+## P2P version (EXAMPLE):
+
+python mainMASACNN.py --dataset MNIST --processors 2 --epochs 2 --batch_size 32 --lr 0.001
+
+## SYNC version (EXAMPLE):
+
+python mainMASCNN.py --dataset MNIST --processors 2 --epochs 2 --batch_size 32 --lr 0.001
+
+## Notes
+
+- Execution runs entirely on CPU (CUDA is not required)
+
+- MNIST is downloaded automatically on first run
+
+- Using --processors 1 disables communication
+
+- Runtime depends on available CPU and memory
+
 
