@@ -1,5 +1,7 @@
 ![visitors](https://visitor-badge.laobi.icu/badge?page_id=DLMPsim.DLMP)
 
+![Visitors](https://visitor-badge.laobi.icu/badge?page_id=DLMPsim.DLMP)
+
 # DLMP
 DLMP: Agent-based simulator for distributed deep learning coordination strategies
 
@@ -49,29 +51,51 @@ Users with limited hardware resources are therefore encouraged to start with the
 
 ## Setup
 
-All experiments run on CPU by default. No additional configuration is required.
+# DLMP - Deep Learning Multi-Processing Simulator (Windows)
 
-python -m venv dlmp_env
-dlmp_env\Scripts\activate
-python -m pip install --upgrade pip
-pip install torch==2.2.2 torchvision==0.17.2 mesa==2.3.2 numpy
+This repository contains the DLMP simulator and a graphical user interface (GUI)
+to run distributed deep learning experiments.
 
-## P2P version (EXAMPLE):
+This version is designed to run on **Windows using CPU**, with minimal setup.
 
-python mainMASACNN.py --dataset MNIST --processors 2 --epochs 2 --batch_size 32 --lr 0.001
+---
 
-## SYNC version (EXAMPLE):
+## Requirements
 
-python mainMASCNN.py --dataset MNIST --processors 2 --epochs 2 --batch_size 32 --lr 0.001
+- `mesa==2.3.2`
+- `numpy`
+- `matplotlib`
+- `PyQt5`
 
-## Notes
+---
 
-- Execution runs entirely on CPU (CUDA is not required)
+## Installation
 
-- MNIST is downloaded automatically on first run
+Run the following file:
 
-- Using --processors 1 disables communication
+install.bat
 
-- Runtime depends on available CPU and memory
+This will:
+- install all required dependencies
+- install CPU-only PyTorch
+- prepare the environment to run the GUI
 
+---
 
+## Running the GUI
+
+Run:
+
+dlmp.bat
+
+---
+
+## What the GUI does
+
+- Select communication mode:
+  - SYNC-central
+  - P2P-ring
+- Configure parameters
+- Run simulation without command line
+
+---
