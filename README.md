@@ -1,6 +1,8 @@
 ![visitors](https://visitor-badge.laobi.icu/badge?page_id=DLMPsim.DLMP)
 
-![Visitors](https://visitor-badge.laobi.icu/badge?page_id=DLMPsim.DLMP)
+![GitHub stars](https://img.shields.io/github/stars/DLMPsim/DLMP)
+
+![License](https://img.shields.io/github/license/DLMPsim/DLMP)
 
 # DLMP
 DLMP: Agent-based simulator for distributed deep learning coordination strategies
