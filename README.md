@@ -91,13 +91,3 @@ Run:
 dlmp.bat
 
 ---
-
-## What the GUI does
-
-- Select communication mode:
-  - SYNC-central
-  - P2P-ring
-- Configure parameters
-- Run simulation without command line
-
----
