@@ -41,16 +41,6 @@ If larger datasets are used, the following limitations may occur on a basic PC:
 
 Users with limited hardware resources are therefore encouraged to start with the MNIST configuration, which is intended to demonstrate the simulator functionality without requiring specialized hardware.
 
-## Requirements
-
--Windows 10/11 (64-bit) (can run in Linux)
-
--Python 3.10
-
--No GPU required (can run in GPU as well)
-
--At least 4 GB RAM (more improves runtime)
-
 ## Setup
 
 # DLMP - Deep Learning Multi-Processing Simulator (Windows)
