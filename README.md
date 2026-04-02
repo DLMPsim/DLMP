@@ -54,13 +54,12 @@ This version is designed to run on **Windows using CPU**, with minimal setup.
 
 ## Requirements
 
-mesa==2.3.2
-numpy==1.26.4
-matplotlib
-PyQt5
-scikit-learn
-pandas
-pillow
+- mesa==2.3.2
+- numpy==1.26.4
+- PyQt5
+- scikit-learn
+- pandas
+- pillow
 
 ---
 
