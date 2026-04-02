@@ -1,103 +1,64 @@
 @echo off
-setlocal
+setlocal EnableExtensions EnableDelayedExpansion
+
+echo ==========================================
+echo DLMP installation (Python 3.10 + NumPy 1.x)
+echo ==========================================
+echo.
 
 cd /d "%~dp0"
 
-echo ==========================================
-echo DLMP installation
-echo ==========================================
-echo.
+set "PY_EXE="
 
-REM Check that Python exists
-python --version >nul 2>&1
-if errorlevel 1 (
-    echo ERROR: Python was not found in PATH.
-    echo Please install Python 3.10 or 3.11, then run this script again.
-    echo.
-    pause
-    exit /b 1
+for /f "delims=" %%i in ('py -3.10 -c "import sys; print(sys.executable)" 2^>nul') do set "PY_EXE=%%i"
+
+if not defined PY_EXE (
+    echo [ERROR] Python 3.10 was not found.
+    echo Install Python 3.10 and rerun.
+    goto :fail
 )
 
-REM Capture Python version
-for /f "tokens=2 delims= " %%v in ('python --version 2^>^&1') do set PYVER=%%v
-echo Detected Python version: %PYVER%
+echo Using Python 3.10:
+echo %PY_EXE%
 echo.
 
-REM Enforce tested Python versions for pinned PyTorch stack
-echo %PYVER% | findstr /r "^3\.10\." >nul
-if %errorlevel%==0 goto version_ok
+"%PY_EXE%" -m pip install --upgrade pip setuptools wheel
 
-echo %PYVER% | findstr /r "^3\.11\." >nul
-if %errorlevel%==0 goto version_ok
+echo Installing NumPy 1.26.4...
+"%PY_EXE%" -m pip uninstall -y numpy >nul 2>nul
+"%PY_EXE%" -m pip install numpy==1.26.4
 
-echo ERROR: This installer supports Python 3.10 or 3.11 only.
-echo Your current Python version is %PYVER%.
-echo.
-echo Reason:
-echo The pinned CPU-only PyTorch version used by DLMP
-echo (torch 2.2.2+cpu, torchvision 0.17.2) is not available
-echo for newer Python versions such as 3.14.
-echo.
-echo Please install Python 3.10 or 3.11 and make sure that
-echo "python" in your terminal points to that installation.
-echo.
-pause
-exit /b 1
+if exist requirements.txt (
+    "%PY_EXE%" -m pip install -r requirements.txt
+) else (
+    "%PY_EXE%" -m pip install mesa==2.3.2 matplotlib PyQt5 scikit-learn pandas pillow
+)
 
-:version_ok
-echo Python version is compatible.
-echo.
+echo Installing PyTorch CPU...
+"%PY_EXE%" -m pip install torch==2.2.2+cpu torchvision==0.17.2 --index-url https://download.pytorch.org/whl/cpu
 
-REM Upgrade pip first
-echo Upgrading pip...
-python -m pip install --upgrade pip
-if errorlevel 1 goto pip_error
-echo.
+echo Re-pin NumPy...
+"%PY_EXE%" -m pip install --force-reinstall numpy==1.26.4
 
-REM Install core requirements
-echo Installing packages from requirements.txt...
-python -m pip install -r requirements.txt
-if errorlevel 1 goto req_error
-echo.
+echo Verifying...
+"%PY_EXE%" -c "import numpy, torch; print('NumPy:', numpy.__version__); print('Torch:', torch.__version__)"
 
-REM Install pinned CPU-only PyTorch
-echo Installing CPU-only PyTorch...
-python -m pip install torch==2.2.2+cpu torchvision==0.17.2 --index-url https://download.pytorch.org/whl/cpu
-if errorlevel 1 goto torch_error
-echo.
+echo Creating launcher...
+> dlmp.bat (
+    echo @echo off
+    echo cd /d "%%~dp0"
+    echo py -3.10 GUIDLMP.py
+    echo pause
+)
 
 echo ==========================================
-echo DLMP installation completed successfully.
+echo INSTALL COMPLETE
 echo ==========================================
-echo.
+
 pause
 exit /b 0
 
-:pip_error
-echo.
-echo ERROR: pip upgrade failed.
-echo Please check your Python installation and internet connection.
-echo.
-pause
-exit /b 1
-
-:req_error
-echo.
-echo ERROR: Installation from requirements.txt failed.
-echo Please review requirements.txt and your internet connection.
-echo.
-pause
-exit /b 1
-
-:torch_error
-echo.
-echo ERROR: CPU-only PyTorch installation failed.
-echo This usually means:
-echo - your Python version is not supported by torch 2.2.2+cpu, or
-echo - your internet connection blocked the download.
-echo.
-echo Recommended fix:
-echo Use Python 3.10 or 3.11, then run this installer again.
-echo.
+:fail
+echo Installation failed.
 pause
 exit /b 1
