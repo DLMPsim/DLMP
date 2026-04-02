@@ -1,5 +1,4 @@
 @echo off
 cd /d "%~dp0"
-python -c "import sys; print(sys.executable)"
-python GUIDLMP_v2.py
+py -3.10 GUIDLMP.py
 pause
