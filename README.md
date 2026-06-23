@@ -81,5 +81,24 @@ This will:
 Run:
 
 dlmp.bat
+---------------------------------------------------------------------------------------------------------
+Non-IID experiments are supported inside the existing DLMP execution scripts.
+There are no separate non-IID programs. Non-IID partitioning is activated through command-line arguments.
+
+For CIFAR-10 non-IID:
+
+python mainMASCNN.py --dataset CIFAR10 --processors 4 --partition nonIID_cifar10 --dirichlet_alpha 0.5 --partition_seed 42
+
+python mainMASACNN.py --dataset CIFAR10 --processors 4 --partition nonIID_cifar10 --dirichlet_alpha 0.5 --partition_seed 42
+
+python mainMASHCNN.py --dataset CIFAR10 --processors 4 --partition nonIID_cifar10 --dirichlet_alpha 0.5 --partition_seed 42
+
+For UA-DETRAC non-IID:
+
+python mainMASCNN.py --dataset UA_DETRACnonIID --processors 3
+
+python mainMASACNN.py --dataset UA_DETRACnonIID --processors 3
+
+python mainMASHCNN.py --dataset UA_DETRACnonIID --processors 3
 
 ---
