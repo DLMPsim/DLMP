@@ -8,6 +8,8 @@ Description:
 Agent-based simulation framework for studying coordination strategies
 in distributed deep learning systems.
 
+This version includes the averaging of weights for the descentralized P2P-ring algorithm
+
 Repository:
 https://github.com/DLMPsim/DLMP
 
@@ -16,6 +18,7 @@ MIT License
 """
 import copy
 from mesa import Agent
+from trainMASACNN import train_simulated, build_loaders
 
 import torch
 
@@ -27,7 +30,6 @@ class ProcessorAgent(Agent):
     in peer-to-peer weight exchange.
     """
     def __init__(self, unique_id, model, Training_ds, Training_lbls, Testing_ds, Testing_lbls, device, args):
-        from trainMASACNN import build_loaders
         super().__init__(unique_id, model)
         self.Training_ds = Training_ds
         self.Training_lbls = Training_lbls
@@ -80,7 +82,6 @@ class ProcessorAgent(Agent):
 
     def step(self):
         import time
-        from trainMASACNN import train_simulated
         
         # Compute-only timing
         compute_start = time.time()
@@ -153,24 +154,33 @@ class ProcessorAgent(Agent):
         return comm_cost
 
 
-
     def receive_weights_from_peer(self, peer_weights):
         self.inbox.append(peer_weights)
 
     def merge_inbox(self):
         if not self.inbox:
             return
-        num_models = len(self.inbox)
+
         device = self.device
         avg_state_dict = {}
-        for k, v in self.neural_net_model.state_dict().items():
+        local_state_dict = self.neural_net_model.state_dict()
+
+        # Average local model + received peer model(s)
+        num_models = len(self.inbox) + 1
+
+        for k, v in local_state_dict.items():
             if v.dtype in (torch.float32, torch.float64, torch.float16):
-                avg = torch.zeros_like(v, dtype=torch.float32).to(device)
+                avg = v.to(device).float().clone()
+
                 for weights in self.inbox:
                     avg += weights[k].to(device).float()
+
                 avg /= num_models
                 avg_state_dict[k] = avg.to(v.dtype)
             else:
-                avg_state_dict[k] = self.inbox[0][k].to(device)
+                # Keep local non-floating buffers unchanged
+                avg_state_dict[k] = v.to(device)
+
         self.neural_net_model.load_state_dict(avg_state_dict)
         self.inbox.clear()
+  

@@ -8,7 +8,9 @@ Description:
 Agent-based simulation framework for studying coordination strategies
 in distributed deep learning systems.
 
-Includes support for non-IID distribution
+
+HIERARCHICAL COMMUNICATION
+
 
 Repository:
 https://github.com/DLMPsim/DLMP
@@ -24,7 +26,7 @@ MIT License
 # --------------------------------------------------
 import torch
 import argparse
-from MASModelCNN import ParallelizationModel
+from MASHModelCNN import ParallelizationModel
 from sklearn.model_selection import train_test_split
 from torchvision import datasets, transforms
 import os
@@ -65,8 +67,8 @@ def main():
     parser.add_argument('--processors', type=int, default=4, help='Number of simulated processors (nodes) to use')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=10, help='Number of epochs')
-    parser.add_argument('--lr', type=float, default=0.01, metavar='LR', help='Learning rate (default: 0.01)')
-    parser.add_argument('--weight_decay', type=float, default=0.0, help='Weight decay')
+    parser.add_argument('--lr', type=float, default=0.01, metavar='LR', help='Learning rate')
+    parser.add_argument('--weight_decay', type=float, default=0.0, help='Weight decay')  
     parser.add_argument('--patience', type=int, default=5, help='Patience for early stopping (default: 5)')
     parser.add_argument('--latency', type=check_latency_range, default="1,10", help="Latency range in ms as 'x,y'")
 
@@ -76,6 +78,7 @@ def main():
 
     parser.add_argument('--net_bw_mbps', type=float, default=100.0,
                     help='Uniform link bandwidth used to convert CC bytes→seconds (default: 100 Mbps)')
+    
     parser.add_argument('--min_gpu_mem_gb', type=float, default=2.0,
                         help='Minimum available GPU memory (in GiB) required to use GPU (default: 2.0)')
 
@@ -87,13 +90,12 @@ def main():
                         help='Activation function to use (default: RELU)')
 ###
     parser.add_argument("--dataset", type=str, default="MNIST",
-                    choices=["MNIST", "CIFAR10", "CIFAR100", "UA_DETRAC", "UA_DETRACnonIID"],
-                    help="Dataset to use")
+                choices=["MNIST", "CIFAR10", "CIFAR100", "UA_DETRAC", "UA_DETRACnonIID"],
+                help="Dataset to use")
     parser.add_argument("--ua_resize", type=int, default=224,
                     help="Resize UA-DETRAC frames to NxN (e.g., 224).")
     parser.add_argument("--ua_limit", type=int, default=0,
-                    help="If >0, limit UA-DETRAC samples for smoke tests (e.g., 2000).")
- ###
+                help="If >0, limit UA-DETRAC samples for smoke tests (e.g., 2000).")
     parser.add_argument("--ua_use_imagenet_norm", action="store_true",
                     help="Use ImageNet normalization (recommended if using pretrained models).")
     parser.add_argument("--partition", type=str, default="iid",
@@ -106,7 +108,7 @@ def main():
 
     args = parser.parse_args()
     args.ds = args.dataset
-    
+
     if args.ds == "UA_DETRACnonIID":
 
         if args.processors != 3:
@@ -118,25 +120,30 @@ def main():
 
     if args.partition == "nonIID_cifar10":
         if args.ds != "CIFAR10":
-            raise ValueError("--partition nonIID_cifar10 is only supported with --dataset CIFAR10.")
+            raise ValueError(
+                "--partition nonIID_cifar10 is only supported with --dataset CIFAR10."
+            )
 
         if args.processors != 4:
-            raise ValueError("--partition nonIID_cifar10 is only supported with --processors 4.")
+            raise ValueError(
+                "--partition nonIID_cifar10 is only supported with --processors 4."
+            )
 
         if args.dirichlet_alpha <= 0:
             raise ValueError("--dirichlet_alpha must be > 0.")
- ###
 
     args.imagenet_pretrained = False
+
     if args.ds in ("UA_DETRAC", "UA_DETRACnonIID"):
         args.imagenet_pretrained = True
-
         args.ua_use_imagenet_norm = True
+
 #------------------------------------------------------ 
 # Assumption: uniform network bandwidth used to convert
 # communication traffic (bytes) into transmission time.
 #------------------------------------------------------ 
     print(f"Assumption: uniform bandwidth = {args.net_bw_mbps} Mbps")
+
     DATA_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "data"))
 
     use_gpu = False
@@ -203,8 +210,7 @@ def main():
         num_classes = 10
         X = dataset.data.transpose((0, 3, 1, 2))
         y = dataset.targets
-        ###
-    elif args.ds == 'CIFAR100':
+    elif args.ds == 'CIFAR100':  
         train_transform = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip(),
@@ -236,13 +242,11 @@ def main():
         Training_ds, Training_lbls = train_ds, list(range(len(train_ds)))
         Testing_ds, Testing_lbls = test_ds, list(range(len(test_ds)))
 
-        model_arch = 'ResNet18'
-        num_classes = 100
-        ###
-    
+        model_arch, num_classes = 'ResNet18', 100
+    ###
     elif args.ds in ('UA_DETRAC', 'UA_DETRACnonIID'):
 
-        from trainMASCNN import UADetracSceneDataset  
+        from trainMASHCNN import UADetracSceneDataset  
 
         
         ua_csv  = "../data/UA-DETRAC/DLMP/scene_labels_traffic.csv"

@@ -8,6 +8,8 @@ Description:
 Agent-based simulation framework for studying coordination strategies
 in distributed deep learning systems.
 
+HIERARCHICAL COMMUNICATION
+
 Repository:
 https://github.com/DLMPsim/DLMP
 
@@ -18,7 +20,7 @@ MIT License
 import copy
 import time
 from mesa import Agent
-from trainMASCNN import train_simulated, build_loaders
+from trainMASHCNN import train_simulated, build_loaders
 import torch
 
 
@@ -140,16 +142,9 @@ class ProcessorAgent(Agent):
         #  Print per-node communication cost once this global epoch
         # ---------------------------------------------------------------
 
-        num_agents = self.model.num_processors
-        # Approximate per-node communication cost per epoch:
-        # (n - 1) * model_size_bytes * 2 (send + receive)
-        self.last_cc = (num_agents - 1) * self.model_size_bytes * 2
-
-        bw_Bps = self.args.net_bw_mbps * 125000.0  # 100 Mbps -> 12,500,000 B/s
-        self.last_comm_time_s = self.last_cc / bw_Bps
-
-        print(f"Node {self.unique_id + 1} Model Communication Cost: {self.last_cc} bytes "
-        f"(~{self.last_comm_time_s:.3f} s at {self.args.net_bw_mbps} Mbps)")
+        self.last_cc = 0
+        self.last_comm_time_s = 0.0
+        
     # --------------------------------------------------------------------- #
     #  Called by model after averaging weights
     # --------------------------------------------------------------------- #

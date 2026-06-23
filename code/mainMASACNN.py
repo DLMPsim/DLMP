@@ -4,6 +4,8 @@ DLMP: Deep Learning Multi-Processing Simulator
 Author: Jorge A. Lopez
 Affiliation: Toronto Metropolitan University
 
+This version includes the non-IID data distribution
+
 Description:
 Agent-based simulation framework for studying coordination strategies
 in distributed deep learning systems.
@@ -14,11 +16,6 @@ https://github.com/DLMPsim/DLMP
 License:
 MIT License
 """
-# --------------------------------------------------
-# Entry point for the DLMP peer-to-peer (P2P) distributed training experiment.
-# This script configures the simulation parameters, loads the selected dataset,
-# initializes the agent-based training model, and runs the experiment.
-# --------------------------------------------------
 import torch
 import argparse
 from MASAModelCNN import ParallelizationModel
@@ -62,6 +59,7 @@ def main():
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=10, help='Number of epochs')
     parser.add_argument('--lr', type=float, default=0.01, metavar='LR', help='Learning rate')
+    parser.add_argument('--weight_decay', type=float, default=0.0, help='Weight decay')
     parser.add_argument('--patience', type=int, default=5, help='Early stopping patience')
     parser.add_argument('--latency', type=check_latency_range, default="1,10",
                         help="Latency range in ms as 'x,y'")
@@ -83,22 +81,50 @@ def main():
                         choices=['RELU','LEAKY_RELU','ELU','SELU','GELU','MISH'],
                         help='Activation')
     parser.add_argument("--dataset", type=str, default="MNIST",
-                    choices=["MNIST", "CIFAR10", "CIFAR100", "UA_DETRAC"],
+                    choices=["MNIST", "CIFAR10", "CIFAR100", "UA_DETRAC", "UA_DETRACnonIID"],
                     help="Dataset to use")
     parser.add_argument("--ua_resize", type=int, default=224,
                     help="Resize UA-DETRAC frames to NxN (e.g., 224).")
     parser.add_argument("--ua_limit", type=int, default=0,
                     help="If >0, limit UA-DETRAC samples for smoke tests (e.g., 2000).")
+###
     parser.add_argument("--ua_use_imagenet_norm", action="store_true",
-                    help="Use ImageNet normalization (recommended if using pretrained models).")
+                help="Use ImageNet normalization (recommended if using pretrained models).")
+    parser.add_argument("--partition", type=str, default="iid",
+                        choices=["iid", "nonIID_cifar10"],
+                        help="Data partition mode: iid or nonIID_cifar10.")
+    parser.add_argument("--dirichlet_alpha", type=float, default=0.5,
+                        help="Dirichlet alpha for non-IID CIFAR-10 partitioning.")
+    parser.add_argument("--partition_seed", type=int, default=42,
+                        help="Random seed for non-IID partitioning.")
+
     args = parser.parse_args()
     args.ds = args.dataset
 
+    if args.ds == "UA_DETRACnonIID":
+
+        if args.processors != 3:
+            raise ValueError(
+                "--dataset UA_DETRACnonIID requires --processors 3."
+            )
+
+        args.partition = "nonIID_uadetrac"
+    
+    if args.partition == "nonIID_cifar10":
+        if args.ds != "CIFAR10":
+            raise ValueError("--partition nonIID_cifar10 is only supported with --dataset CIFAR10.")
+
+        if args.processors != 4:
+            raise ValueError("--partition nonIID_cifar10 is only supported with --processors 4.")
+
+        if args.dirichlet_alpha <= 0:
+            raise ValueError("--dirichlet_alpha must be > 0.")
+###
     # UA-DETRAC uses ResNet18 with ImageNet-pretrained weights
     # and ImageNet normalization by default.
     
     args.imagenet_pretrained = False
-    if args.ds == "UA_DETRAC":
+    if args.ds in ("UA_DETRAC", "UA_DETRACnonIID"):
         args.imagenet_pretrained = True
         args.ua_use_imagenet_norm = True
         print("Using ImageNet pretrained weights.")
@@ -152,7 +178,7 @@ def main():
         X = dataset.data.transpose((0,3,1,2))
         y = torch.as_tensor(getattr(dataset, "targets", getattr(dataset, "labels", []))).cpu().numpy()
     
-    elif args.ds == 'UA_DETRAC':
+    elif args.ds in ('UA_DETRAC', 'UA_DETRACnonIID'):
         # UA-DETRAC scene-level traffic classification (mild/medium/congested).
         # Uses streaming dataset loading to avoid preloading the full dataset into RAM.
 
@@ -192,20 +218,43 @@ def main():
         Testing_ds, Testing_lbls = val_ds, None
         model_arch, num_classes = 'ResNet18', 3
     else:
-        transform = transforms.Compose([
+        train_transform = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize((0.5,0.5,0.5), (0.5,0.5,0.5))
+            transforms.Normalize((0.5071, 0.4867, 0.4408),
+                                 (0.2675, 0.2565, 0.2761))
         ])
-        dataset = datasets.CIFAR100(root=DATA_ROOT, train=True,
-                                    transform=transform, download=True)
+
+        test_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.5071, 0.4867, 0.4408),
+                                 (0.2675, 0.2565, 0.2761))
+        ])
+
+        train_ds = datasets.CIFAR100(
+            root=DATA_ROOT,
+            train=True,
+            transform=train_transform,
+            download=True
+        )
+
+        test_ds = datasets.CIFAR100(
+            root=DATA_ROOT,
+            train=False,
+            transform=test_transform,
+            download=True
+        )
+
+        Training_ds, Training_lbls = train_ds, list(range(len(train_ds)))
+        Testing_ds, Testing_lbls = test_ds, list(range(len(test_ds)))
+
         model_arch, num_classes = 'ResNet18', 100
-        X = dataset.data.transpose((0,3,1,2))
-        y = torch.as_tensor(getattr(dataset, "targets", getattr(dataset, "labels", []))).cpu().numpy()
 
 
     # Split data
     print("Using dataset:", args.ds)
-    if args.ds != 'UA_DETRAC':
+    if args.ds not in ['UA_DETRAC', 'UA_DETRACnonIID', 'CIFAR100']:
         Training_ds, Testing_ds, Training_lbls, Testing_lbls = \
             train_test_split(X, y, test_size=0.2, random_state=42)
 

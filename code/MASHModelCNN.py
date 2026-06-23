@@ -1,70 +1,45 @@
-"""
-DLMP: Deep Learning Multi-Processing Simulator
-
-Author: Jorge A. Lopez
-Affiliation: Toronto Metropolitan University
-
-Description:
-Agent-based simulation framework for studying coordination strategies
-in distributed deep learning systems.
-
-Supports non-IDD distribution
-
-Repository:
-https://github.com/DLMPsim/DLMP
-
-License:
-MIT License
-"""
-
 from mesa import Model
-from mesa.time import RandomActivation
-from MASAAgentCNN import ProcessorAgent
-from trainMASACNN import get_model
+from mesa.time import SimultaneousActivation
+from MASHAgentCNN import ProcessorAgent
+from trainMASHCNN import get_model
 import torch
 import random
 import time
+
 import numpy as np
 
 from partition_utils import make_dirichlet_cifar10_indices, make_dirichlet_uadetrac_indices
 
-class ParallelizationModel(Model):
-    """
-    Simulates a parallel processing environment where multiple processor agents
-    train on different data partitions and exchange their neural network weights
-    asynchronously using a ring topology.
-    """
-    
+## HIERARCHICAL
 
+class ParallelizationModel(Model):
     def __init__(self, Training_ds, Training_lbls, Testing_ds, Testing_lbls, device, args):
         super().__init__()
         self.device = device
         self.args = args
         self.num_processors = args.processors
-        self.schedule = RandomActivation(self)
+        self.schedule = SimultaneousActivation(self)
         self.total_comm_cost = 0
-        # Compute-capacity upper bound (min is fixed at 1.0)
+        # Compute-capacity upper bound (min fixed at 1.0)
         self.capacity_max = getattr(self.args, "capacity_max", 2.0)
 
-        # Initialize model architecture (UA-DETRAC uses args.num_classes)
-        num_classes = getattr(self.args, "num_classes", 100 if self.args.ds == "CIFAR100" else 10)
+    ###
+        self.total_processing_time = 0.0
+        self.total_e2e_time = 0.0  # (optional but recommended) track end-to-end time cleanly
+
+        # IMPORTANT: Use args.num_classes (UA/EV-DETRAC = 3). Keep a safe fallback for older runs.
+        num_classes = getattr(self.args, "num_classes", 100 if args.ds == "CIFAR100" else 10)
+
+        # Initialize model architecture (UA/EV-DETRAC uses args.num_classes)
         pretrained = getattr(self.args, "imagenet_pretrained", False)
         self.model = get_model(self.args.arch, num_classes=num_classes, pretrained=pretrained).to(device)
 
 
-        # Create agents and split data
+
+    ###
         self._split_data_and_create_agents(Training_ds, Training_lbls, Testing_ds, Testing_lbls)
-        # Assign ring peers (one neighbor each)
-            
-        agents = self.schedule.agents
-        n = len(agents)
-        for i, agent in enumerate(agents):
-            if n > 1:
-                neighbor = agents[(i + 1) % n]
-                agent.set_peers([neighbor])
-            else:
-                agent.set_peers([])  # no peer in single-node runs → zero CC/time        
-      
+
+    ### replaced
     def _split_data_and_create_agents(self, Training_ds, Training_lbls, Testing_ds, Testing_lbls):
         """
         Supports two modes:
@@ -79,7 +54,7 @@ class ParallelizationModel(Model):
         total_train = len(Training_ds)
         total_test = len(Testing_ds)
 
-        # Assign compute capacities uniformly in [1.0, capacity_max].
+        # --- UNIFORM compute capacities in [1.0, capacity_max] ---
         low, high = 1.0, float(self.capacity_max)
         capacities = [random.uniform(low, high) for _ in range(self.num_processors)]
         self.capacities = capacities
@@ -135,7 +110,7 @@ class ParallelizationModel(Model):
                 print(f"Node {i + 1} compute capacity (uniform {low}..{high}): {agent.compute_capacity:.3f}")
 
         else:
-            ###
+###
 
             partition_mode = getattr(self.args, "partition", "iid")
 
@@ -148,7 +123,7 @@ class ParallelizationModel(Model):
                     self.num_processors,
                     alpha=getattr(self.args, "dirichlet_alpha", 0.5),
                     seed=getattr(self.args, "partition_seed", 42)
-)
+                    )
 
             else:
                 train_per_agent = total_train // self.num_processors
@@ -198,117 +173,164 @@ class ParallelizationModel(Model):
                     f"(uniform {low}..{high}): "
                     f"{agent.compute_capacity:.3f}"
                 )
-            ###
-            
+###
+
+    def _average_state_dicts(self, state_dicts):
+        avg_state = {}
+
+        for k in state_dicts[0].keys():
+            v0 = state_dicts[0][k]
+
+            if torch.is_floating_point(v0):
+                avg = torch.zeros_like(v0, dtype=torch.float32)
+
+                for sd in state_dicts:
+                    avg += sd[k].float()
+
+                avg /= len(state_dicts)
+                avg_state[k] = avg.to(v0.dtype)
+            else:
+                avg_state[k] = v0.clone()
+
+        return avg_state
+        
+    ### HIERARCHICAL
+    
+    def synchronize_weights(self):
+        if len(self.schedule.agents) == 1:
+            print("Only one processor: skipping hierarchical weight synchronization and communication cost.")
+            return 0
+
+        agents = list(self.schedule.agents)
+        num_agents = len(agents)
+
+        # Split agents into two hierarchy groups.
+        midpoint = num_agents // 2
+        groups = [agents[:midpoint], agents[midpoint:]]
+
+        # First level: average weights inside each group.
+        group_weights = []
+
+        for group in groups:
+            group_state_dicts = []
+
+            for agent in group:
+                state_dict = {
+                    k: v.cpu()
+                    for k, v in agent.neural_net_model.state_dict().items()
+                }
+                group_state_dicts.append(state_dict)
+
+            group_avg = self._average_state_dicts(group_state_dicts)
+            group_weights.append(group_avg)
+
+        # Second level: average group models into one global model.
+        global_weights = self._average_state_dicts(group_weights)
+
+        # Hierarchical communication cost:
+        # Level 1: each node sends to and receives from its group aggregator = 2S per node.
+        # Level 2: each group aggregator sends to and receives from global aggregator = 2S per group.
+        model_size = agents[0].model_size_bytes
+        num_groups = len(groups)
+        epoch_comm_cost = (2 * model_size * num_agents) + (2 * model_size * num_groups)
+
+        self.total_comm_cost += epoch_comm_cost
+
+        print(
+            f"Hierarchical communication cost this epoch: {epoch_comm_cost} bytes; "
+            f"Cumulative cost: {self.total_comm_cost} bytes"
+        )
+
+        # Optional latency simulation, preserved from original SYNC behavior.
+        m, n = self.args.latency
+        if m * n != 0:
+            latency = random.uniform(m / 1000, n / 1000)
+            print(
+                f"Simulating network latency of {latency:.4f} seconds "
+                f"during hierarchical weight synchronization..."
+            )
+            time.sleep(latency)
+
+        # Broadcast final hierarchical global model back to all agents.
+        for agent in agents:
+            agent.neural_net_model.load_state_dict(global_weights)
+
+        # Communication time from CC and bandwidth.
+        bw_Bps = self.args.net_bw_mbps * 125000.0
+        comm_time_s = epoch_comm_cost / bw_Bps
+
+        for agent in agents:
+            agent.last_cc = epoch_comm_cost / num_agents
+            agent.last_comm_time_s = comm_time_s
+
+        return epoch_comm_cost   
 
     def step(self):
         self.schedule.step()
+
+        comm_cost = self.synchronize_weights()
+
         total_correct = 0
         total_test_examples = 0
         slowest_processing_time = 0
-        epoch_cc = 0
+
         for agent in self.schedule.agents:
             total_correct += agent.correct_classifications
             total_test_examples += agent.test_set_size
             slowest_processing_time = max(slowest_processing_time, agent.processing_time)
-            epoch_cc += agent.last_cc
-        self.total_comm_cost += epoch_cc
-        total_testing_accuracy = (total_correct / total_test_examples) * 100 if total_test_examples > 0 else 0
-        print(f"Total Testing Accuracy this epoch: {total_correct}/{total_test_examples} = {total_testing_accuracy:.2f}%")
-        self.last_epoch_total_acc = total_testing_accuracy
-        # Compute-only time (slowest node)
-        print(f"Processing Time (compute only) this epoch: {slowest_processing_time:.4f} seconds")
-        self.total_compute_time = getattr(self, "total_compute_time", 0.0) + slowest_processing_time
 
-        # Communication time for the epoch (slowest node).
-        slowest_comm_time = max(getattr(a, 'last_comm_time_s', 0.0) for a in self.schedule.agents)
+        total_testing_accuracy = (total_correct / total_test_examples) * 100 if total_test_examples > 0 else 0
+
+        print(f"Total Testing Accuracy this epoch: {total_correct}/{total_test_examples} = {total_testing_accuracy:.2f}%")
+        print(f"Processing Time (compute only) this epoch: {slowest_processing_time:.4f} seconds")
+
+        # NEW: comm time from agents (per-epoch, per-node → take the slowest)
+        slowest_comm_time = max(getattr(a, "last_comm_time_s", 0.0) for a in self.schedule.agents)
         print(f"Communication Time (assumed {self.args.net_bw_mbps} Mbps): {slowest_comm_time:.4f} seconds")
-        self.total_comm_time = getattr(self, "total_comm_time", 0.0) + slowest_comm_time
-        # end-to-end = compute + comm
+
         end_to_end_time = slowest_processing_time + slowest_comm_time
         print(f"Processing Time (end-to-end) this epoch: {end_to_end_time:.4f} seconds")
-        print(f"Cumulative Communication Cost until now: {self.total_comm_cost} bytes")
+
+        self.total_processing_time += slowest_processing_time  # keep compute-only total if you want
+        # (Optional) also keep a total E2E time:
         self.total_e2e_time = getattr(self, "total_e2e_time", 0.0) + end_to_end_time
 
-    def run_model(self, epochs):
-    
-        total_train_correct = 0
-        total_train_items   = 0
+        print(f"Cumulative Communication Cost until now: {self.total_comm_cost} bytes")
 
-        total_comm_cost = 0
-        total_compute_time = 0.0
-        total_comm_time = 0.0
-        total_e2e_time = 0.0
-        total_correct_items = 0
-        total_test_items = 0
+    ###
+    def run_model(self, num_steps):
+        """
+        Run SYNC distributed training for num_steps GLOBAL epochs.
+        Final accuracy = last epoch accuracy only.
+        GRAND TOTAL is used only for time and communication.
+        """
 
-        for epoch_idx in range(1, epochs + 1):
-            print(f"\n** Epoch {epoch_idx} of {epochs} starts **")
+        final_test_correct = 0
+        final_test_total = 0
+        final_train_correct = 0
+        final_train_total = 0
 
-            # Reset per-epoch totals
-            slowest_processing_time = 0.0
-            slowest_comm_time = 0.0
-            total_correct = 0
-            total_test_examples = 0
+        for epoch in range(1, num_steps + 1):
+            print(f"\n** Epoch {epoch} of {num_steps} starts **")
 
-            if self.num_processors == 1:
-                # No sync or comm time in single-node runs
-                for agent in self.schedule.agents:
-                    agent.last_cc = 0
-                    agent.last_comm_time_s = 0.0
-                self.step()
-            else:
-                self.step()
+            self.step()
 
-            # After agents step, collect metrics
-            for agent in self.schedule.agents:
-                total_correct += agent.correct_classifications
-                total_test_examples += agent.test_set_size
-                slowest_processing_time = max(slowest_processing_time, agent.processing_time)
-                slowest_comm_time = max(slowest_comm_time, getattr(agent, "last_comm_time_s", 0.0))
+            final_test_correct = sum(a.correct_classifications for a in self.schedule.agents)
+            final_test_total = sum(a.test_set_size for a in self.schedule.agents)
 
-            # Communication cost (skip if single node)
-            if self.num_processors > 1:
-                comm_cost = sum(getattr(agent, "last_cc", 0) for agent in self.schedule.agents)
-                total_comm_cost += comm_cost
-                print(f"Communication cost this epoch: {comm_cost} bytes; "
-                      f"Cumulative cost: {total_comm_cost} bytes")
-            else:
-                print("Only one processor: skipping weight synchronization and communication cost.")
+            final_train_correct = sum(getattr(a, "train_correct", 0) for a in self.schedule.agents)
+            final_train_total = sum(getattr(a, "train_total", 0) for a in self.schedule.agents)
 
-            # Accuracy and times for this epoch
-            accuracy = 100.0 * total_correct / total_test_examples
-            total_correct_items += total_correct
-            total_test_items += total_test_examples
-            total_compute_time += slowest_processing_time
-                       
-            print(f"TOTAL Final Accuracy after epoch: {accuracy:.2f}%")
-            print(f"Processing Time (compute only): {slowest_processing_time:.4f} seconds")
+            train_acc = (100.0 * final_train_correct / final_train_total) if final_train_total else 0.0
+            print(f"TOTAL Training Accuracy after epoch: {final_train_correct}/{final_train_total} = {train_acc:.2f}%")
 
-            epoch_comm_time_sum = (0.0 if self.num_processors == 1 else
-                sum(getattr(agent, "last_comm_time_s", 0.0) for agent in self.schedule.agents))
-            total_comm_time += epoch_comm_time_sum
-            print(f"Communication Time (sum over nodes): {epoch_comm_time_sum:.4f} seconds")
-            total_e2e_time += slowest_processing_time + slowest_comm_time
-            print(f"Processing end-to-end time: {slowest_processing_time + slowest_comm_time:.4f} seconds")
-            # --- TOTAL Training Accuracy after epoch (all nodes, all datasets) ---
-            train_correct_this_epoch = sum(a.train_correct for a in self.schedule.agents)
-            train_total_this_epoch   = sum(a.train_total   for a in self.schedule.agents)
-            train_accuracy = 100.0 * train_correct_this_epoch / train_total_this_epoch if train_total_this_epoch else 0.0
-            print(f"TOTAL Training Accuracy after epoch: {train_correct_this_epoch}/{train_total_this_epoch} = {train_accuracy:.2f}%")
+        final_test_acc = (100.0 * final_test_correct / final_test_total) if final_test_total else 0.0
+        final_train_acc = (100.0 * final_train_correct / final_train_total) if final_train_total else 0.0
 
-            # accumulate GRAND totals
-            total_train_correct += train_correct_this_epoch
-            total_train_items   += train_total_this_epoch
-
-        # --- Final GRAND TOTALS ---
-        grand_test_acc = 100.0 * total_correct / total_test_examples if total_test_examples else 0.0
-        print(f"FINAL Test Accuracy: {total_correct}/{total_test_examples} = {grand_test_acc:.2f}%")
-        print(f"GRAND TOTAL Communication Cost over all epochs: {total_comm_cost} bytes")
-        print(f"GRAND TOTAL Communication Time over all epochs: {total_comm_time:.4f} seconds")
-        print(f"GRAND TOTAL Processing Time (compute only): {total_compute_time:.4f} seconds")
-        print(f"GRAND TOTAL Processing end-to-end time: {total_e2e_time:.4f} seconds")
-
-        grand_train_acc = 100.0 * train_correct_this_epoch / train_total_this_epoch if train_total_this_epoch else 0.0
-        print(f"FINAL Training Accuracy: {train_correct_this_epoch}/{train_total_this_epoch} = {grand_train_acc:.2f}%")
-             
+        print(f"\nFINAL Test Accuracy: {final_test_correct}/{final_test_total} = {final_test_acc:.2f}%")
+        print(f"GRAND TOTAL Communication Cost over all epochs: {getattr(self, 'total_comm_cost', 0)} bytes")
+        print(f"GRAND TOTAL Processing Time (compute only): {getattr(self, 'total_processing_time', 0.0):.4f} seconds")
+        print(f"GRAND TOTAL Processing end-to-end time: {getattr(self, 'total_e2e_time', 0.0):.4f} seconds")
+        print(f"FINAL Training Accuracy: {final_train_correct}/{final_train_total} = {final_train_acc:.2f}%")
+        ###
+        

@@ -7,6 +7,7 @@ This GUI provides a simplified interface to configure and run distributed
 training simulations using:
 - SYNC-central communication (mainMASCNN.py)
 - P2P-ring communication (mainMASACNN.py)
+- Hierarchical communication (mainMASHCNN.py)
 
 Supported datasets:
 - MNIST
@@ -69,8 +70,10 @@ class DLMPMainWindow(QMainWindow):
         self.base_dir = Path(__file__).resolve().parent
         self.sync_script = self.base_dir / "mainMASCNN.py"
         self.p2p_script = self.base_dir / "mainMASACNN.py"
+        self.hierarchical_script = self.base_dir / "mainMASHCNN.py"
 
         self.process = QProcess(self)
+        self.cursor_overridden = False
 
         self.setWindowTitle("DLMP GUI")
         self.resize(900, 780)
@@ -108,14 +111,17 @@ class DLMPMainWindow(QMainWindow):
 
         self.sync_radio = QRadioButton("SYNC-central")
         self.p2p_radio = QRadioButton("P2P-ring")
+        self.hierarchical_radio = QRadioButton("Hierarchical")
         self.sync_radio.setChecked(True)
 
         self.mode_group = QButtonGroup(self)
         self.mode_group.addButton(self.sync_radio)
         self.mode_group.addButton(self.p2p_radio)
+        self.mode_group.addButton(self.hierarchical_radio)
 
         mode_layout.addWidget(self.sync_radio)
         mode_layout.addWidget(self.p2p_radio)
+        mode_layout.addWidget(self.hierarchical_radio)
         mode_layout.addStretch()
         mode_group.setLayout(mode_layout)
         main_layout.addWidget(mode_group)
@@ -329,6 +335,11 @@ class DLMPMainWindow(QMainWindow):
         if self.patience_spin.value() > epochs:
             self.patience_spin.setValue(epochs)
 
+    def restore_wait_cursor(self):
+        if self.cursor_overridden:
+            QApplication.restoreOverrideCursor()
+            self.cursor_overridden = False
+
     def validate_inputs(self):
         if self.latency_x_spin.value() > self.latency_y_spin.value():
             QMessageBox.warning(
@@ -354,10 +365,24 @@ class DLMPMainWindow(QMainWindow):
             )
             return False
 
+        if not self.hierarchical_script.exists():
+            QMessageBox.critical(
+                self,
+                "Missing file",
+                f"Could not find:\n{self.hierarchical_script}",
+            )
+            return False
+
         return True
 
     def selected_script(self):
-        return self.sync_script if self.sync_radio.isChecked() else self.p2p_script
+        if self.sync_radio.isChecked():
+            return self.sync_script
+
+        if self.p2p_radio.isChecked():
+            return self.p2p_script
+
+        return self.hierarchical_script
 
     def selected_dataset(self):
         if self.cifar10_radio.isChecked():
@@ -371,6 +396,7 @@ class DLMPMainWindow(QMainWindow):
     def build_command(self):
         command = [
             sys.executable,
+            "-u",
             str(self.selected_script()),
             "--processors", str(self.processors_spin.value()),
             "--batch_size", self.batch_combo.currentText(),
@@ -410,7 +436,18 @@ class DLMPMainWindow(QMainWindow):
 
         self.output_text.clear()
         self.status_label.clear()
-        self.processing_label.setText("Processing...")
+        self.processing_label.setText("Processing... DLMP is running")
+
+        # Disable ONLY RUN SIMULATION while the process is running.
+        self.run_button.setEnabled(False)
+
+        # Keep the other buttons alive during the process.
+        self.stop_button.setEnabled(True)
+        self.clear_button.setEnabled(True)
+        self.exit_button.setEnabled(True)
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self.cursor_overridden = True
 
         self.output_text.append("Launching DLMP simulation...\n")
         self.output_text.append(f"Working directory: {self.base_dir}\n")
@@ -420,16 +457,20 @@ class DLMPMainWindow(QMainWindow):
         self.process.start(program, arguments)
 
         if not self.process.waitForStarted(3000):
+            self.restore_wait_cursor()
             self.processing_label.clear()
+
+            self.run_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
+            self.clear_button.setEnabled(True)
+            self.exit_button.setEnabled(True)
+
             QMessageBox.critical(
                 self,
                 "Launch error",
                 "The simulator process could not be started.",
             )
             return
-
-        self.run_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
 
     def stop_simulation(self):
         if self.process.state() == QProcess.NotRunning:
@@ -439,10 +480,21 @@ class DLMPMainWindow(QMainWindow):
         self.processing_label.clear()
         self.status_label.clear()
 
+        self.restore_wait_cursor()
+
         self.process.kill()
         self.process.waitForFinished(2000)
 
+        self.run_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.clear_button.setEnabled(True)
+        self.exit_button.setEnabled(True)
+
     def process_finished(self):
+        self.handle_stdout()
+        self.handle_stderr()
+        self.restore_wait_cursor()
+
         self.output_text.moveCursor(QTextCursor.End)
         self.output_text.insertPlainText("\nSimulation finished.\n")
         self.output_text.moveCursor(QTextCursor.End)
@@ -452,6 +504,8 @@ class DLMPMainWindow(QMainWindow):
 
         self.run_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        self.clear_button.setEnabled(True)
+        self.exit_button.setEnabled(True)
 
     def handle_stdout(self):
         text = bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
@@ -467,11 +521,16 @@ class DLMPMainWindow(QMainWindow):
 
     def clear_output(self):
         self.output_text.clear()
-        self.processing_label.clear()
         self.status_label.clear()
+
+        if self.process.state() == QProcess.NotRunning:
+            self.processing_label.clear()
+        else:
+            self.processing_label.setText("Processing... DLMP is running")
 
     def closeEvent(self, event):
         if self.process.state() == QProcess.NotRunning:
+            self.restore_wait_cursor()
             event.accept()
             return
 
@@ -484,6 +543,7 @@ class DLMPMainWindow(QMainWindow):
         )
 
         if reply == QMessageBox.Yes:
+            self.restore_wait_cursor()
             self.process.kill()
             self.process.waitForFinished(2000)
             event.accept()
@@ -493,6 +553,7 @@ class DLMPMainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    app.setStyleSheet("QWidget { font-size: 14pt; }")
     window = DLMPMainWindow()
     window.show()
     sys.exit(app.exec_())
