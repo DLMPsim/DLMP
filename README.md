@@ -82,6 +82,7 @@ Run:
 
 dlmp.bat
 ---------------------------------------------------------------------------------------------------------
+## NON-IID EXPERIMENTS
 Non-IID experiments are supported inside the existing DLMP execution scripts.
 There are no separate non-IID programs. Non-IID partitioning is activated through command-line arguments.
 
